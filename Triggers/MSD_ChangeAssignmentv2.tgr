@@ -1,0 +1,228 @@
+trigger MSD_ChangeAssignmentv2 on MAH_Ticket__c (before insert, before update) {
+
+    /* Define variable */
+    set<Id> setProject = new Set<Id>();
+    Map<id,Project_vod__c> mapProject = new Map<Id,Project_vod__c>();
+    Map<String,String> queueMap = new Map<String, String>();
+    Set<Id> queueIdSet = new set<ID>();
+    Map<Id,Recordtype> recTypeMap = new Map<Id, Recordtype>();
+    Map<id,List<MSD_CA_Project_Approvers__c>> mapUser = new Map<Id,List<MSD_CA_Project_Approvers__c>>();
+    Integer approvalCount =0;
+    
+ // **** Create Set of Related MarketIds **** //
+    for(MAH_Ticket__c sp: Trigger.new){
+        setProject.add(sp.project__c);
+    }
+ //**** Create Map of related Market Records **** //
+    mapProject = new Map<Id,Project_vod__c>([select id,name,msd_primary_contact__c,msd_technical_lead__c,MSD_Primary_CLM_Contact__c,MSD_Release_Coordinator__c, (select id,MSD_Approver__c from CA_Project_Approvers__r) FROM Project_vod__c where id in :setProject]);
+
+ // **** Create Set and Map of CI queues **** //
+        for(Group qSob : [SELECT Id,developername,type FROM group WHERE Type='Queue']){
+        queueMap.put(qSob.developername,qSob.id);
+        system.debug('&&&&&&&&&1051'+queueMap);
+        queueIdSet.add(qSob.id);}
+        
+ // **** Create Map of CR recordtypes **** //
+    for(Recordtype recType : [SELECT DeveloperName,Id,IsActive,Name,SobjectType FROM RecordType where SobjectType = 'MAH_Ticket__c']){
+        recTypeMap.put(recType.id,recType);
+       // system.debug('Record Type available :**********' +recTypeMap);
+    }   
+ 
+ //--------------------------------------------------------------------------------------------------------------------------------//    
+     // **** Update Primay Contact Information on CRs from respective Markets, and Create Map of respective Market Approvers **** //
+    if(Trigger.isBefore && Trigger.isInsert || Trigger.isUpdate){
+        for(MAH_Ticket__c sp: Trigger.new){
+            // **** Check if Recortype is CRM **** //
+            if(recTypeMap.get(sp.recordtypeid).developername == 'MSD_CRM'){
+                // **** Populate Primary Contact Details from respective Markets **** //
+                sp.msd_primary_contact__c = mapProject.get(sp.project__c).msd_primary_contact__c;
+                sp.MSD_Primary_CLM_Contact__c = mapProject.get(sp.project__c).MSD_Primary_CLM_Contact__c;
+                sp.MSD_Release_Coordinator__c = mapProject.get(sp.project__c).MSD_Release_Coordinator__c;
+                sp.MSD_Technical_Lead__c = mapProject.get(sp.project__c).Msd_Technical_Lead__c;
+                sp.MSD_Sequential_Approval_Required__c = 'No';
+                
+                // **** Create List of Market Approvers **** //
+                List<MSD_CA_Project_Approvers__c> userList = new List<MSD_CA_Project_Approvers__c>();
+                for(MSD_CA_Project_Approvers__c obj : mapProject.get(sp.project__c).CA_Project_Approvers__r){
+                    userList.add(obj);
+                }
+                
+                // **** Create Map of Market and respective Approver List **** //
+                mapUser.put(sp.project__c, userList);
+            }
+        }    
+    } 
+  //------------------------------------------------------------------------------------------------------------------// 
+    // **** Check if Trigger is Update **** //
+    if(Trigger.isUpdate){
+        
+        for(MAH_Ticket__c sp: Trigger.new){
+            
+            if(recTypeMap.get(sp.recordtypeid).developername == 'MSD_CRM'){
+                
+                List<MSD_CA_Project_Approvers__c> userList = new List<MSD_CA_Project_Approvers__c>();
+                for(MSD_CA_Project_Approvers__c obj : mapProject.get(sp.project__c).CA_Project_Approvers__r){
+                    userList.add(obj);
+                }
+                mapUser.put(sp.project__c, userList);
+                }
+                } 
+            // **** List of CR related Technical Changes **** //    
+            List<MAH_Technical_Change__c>  mahTchList = new List<MAH_Technical_Change__c>();
+        
+            // **** Update Release Detail on the respective Child Technical Changes **** //
+            for(MAH_Technical_Change__c mah : [select id,name,msd_status__c, msd_mars_release__c,mah_ticket__c,mah_ticket__r.release__c from MAH_Technical_Change__c where mah_ticket__c in :trigger.new]){
+            
+            // **** Update release on child technical changes if release detail is modified on parent CR **** //
+            if(Trigger.oldMap.get(mah.mah_ticket__c).release__c != Trigger.newMap.get(mah.mah_ticket__c).release__c){
+                mah.msd_mars_release__c = mah.mah_ticket__r.release__c;
+            
+            }
+          
+            // Update Technical change status based on status change on the Change identifier
+ 
+            // **** Update Tech Change status to Dev Complete if parent CR status is Dev Complete based on below condition **** //
+            if(Trigger.newMap.get(mah.mah_ticket__c).MSD_Status__c == 'Dev Complete'){
+                if(mah.msd_status__c != 'Issues in Migration to test' && mah.msd_status__c != 'Issues in Migration to Prod' && mah.msd_status__c != 'Void (Delete/Remove from test)')
+                mah.msd_status__c = 'Dev Complete';
+            }
+            // **** Update Tech Change status to 'Migrated to Test' if parent CR status is 'Ready for QA' based on below condition **** //
+            if(Trigger.newMap.get(mah.mah_ticket__c).MSD_status__c == 'Ready for Test'){
+                if(mah.msd_status__c != 'Issues in Migration to test' && mah.msd_status__c != 'Issues in Migration to Prod' && mah.msd_status__c != 'Void (Delete/Remove from test)')
+                mah.msd_status__c = 'Migrated to Test';
+            }
+            
+            // **** Update Tech Change status to 'Migrated to Prod' if parent CR status is 'Release Ready' based on below condition **** //
+            if(Trigger.newMap.get(mah.mah_ticket__c).MSD_status__c == 'Release Ready'){
+                if(mah.msd_status__c != 'Issues in Migration to test' && mah.msd_status__c != 'Issues in Migration to Prod' && mah.msd_status__c != 'Void (Delete/Remove from test)')
+                mah.msd_status__c = 'Migrated to Prod';
+                //mahTchList.add(mah);
+            }
+            mahTchList.add(mah);
+        }
+        
+        // **** Update status on Tech changes **** //
+        update mahTchList;
+                
+    }
+       system.debug('****************106');    
+ // Update owner of the ticket based on the status of the ticket.   
+       For (Mah_ticket__c oObj:trigger.new) { 
+       system.debug('****************109');
+        // **** Check if recordtype is CRM **** //
+            if(recTypeMap.get(oObj.recordtypeid).developername == 'MSD_CRM'){
+            system.debug('****************112'+oObj.MSD_Status__c);
+ //*********************************************************************************************       
+        // **** Check if status is submitted **** //
+           if (oObj.MSD_Status__c=='Submitted' && oObj.MSD_Status__c != 'Deploy to Prod'){
+           string str = 'MSD_'+mapProject.get(oObj.Project__c).name+'_Business';  
+           oObj.ownerId = queueMap.get(str);}
+//**********************************************************************************************
+
+//*********************************************************************************************       
+        // **** Check if status is Business Approval **** //
+           if (oObj.MSD_Status__c=='Business Approval' && oObj.MSD_Status__c != 'Deploy to Prod'){
+           string str = 'MSD_'+mapProject.get(oObj.Project__c).name+'_Technical';  
+           oObj.ownerId = queueMap.get(str);
+           }
+//**********************************************************************************************
+
+//*********************************************************************************************       
+      // **** Check if status is Tech Approval **** //
+           if (oObj.MSD_Status__c=='Rejected'){
+          // string str = 'MSD_'+mapProject.get(oObj.Project__c).name+'_RC';  
+           oObj.ownerId = oObj.Createdbyid;
+           } 
+//**********************************************************************************************
+ 
+        // **** Check if status is Ready For Dev ; 092314-- add condition to check for development environment **** //
+           if (oObj.MSD_Status__c=='Ready for Dev'&& oObj.MSD_Status__c != 'Deploy to Prod'){
+               if(oObj.MSD_Development_Environment__c !=Null){
+           string str = 'MSD_'+mapProject.get(oObj.Project__c).name+'_Dev';
+          oObj.ownerId = queueMap.get(str);
+          }
+          else {
+           oObj.MSD_Development_Environment__c.addError('Cannot Change Status to Ready for Dev;Assign Development Environment');
+           }
+             
+          }
+
+//***************************************************************
+//*****************************************************************
+ 
+        // **** Check if status is Dev Complete **** //
+           if (oObj.MSD_Status__c=='Dev Complete'){
+           string str = 'MSD_'+mapProject.get(oObj.Project__c).name+'_RC';
+            oObj.ownerId = queueMap.get(str);
+          }
+
+//***************************************************************
+
+//*****************************************************************
+ 
+        // **** Check if status is Deploy To Test**** //
+           if (oObj.MSD_Status__c=='Deploy To Test' && oObj.MSD_Status__c != 'Deploy to Prod'){
+               if(oObj.Release__c != NULL){
+           string str = 'MSD_'+mapProject.get(oObj.Project__c).name+'_RMO';
+            oObj.ownerId = queueMap.get(str);
+          }
+          else{
+              oObj.Release__c.addError('Cannot Change Status to Deploy to test without associated Release; Please select Release, or contact your RC');
+              }
+              }
+
+
+//***************************************************************
+//*****************************************************************
+ 
+        // **** Check if status is Ready for Test**** //
+           if (oObj.MSD_Status__c=='Ready for Test' && oObj.MSD_Status__c != 'Deploy to Prod'){
+           string str = 'MSD_'+mapProject.get(oObj.Project__c).name+'_QA';
+            oObj.ownerId = queueMap.get(str);         
+             }
+
+//***************************************************************
+ 
+        // **** Check if status is Test Complete**** //
+           if (oObj.MSD_Status__c=='Test Complete'){
+           string str = 'MSD_'+mapProject.get(oObj.Project__c).name+'_RC';
+            oObj.ownerId = queueMap.get(str);
+          }
+
+//***************************************************************
+ 
+        // **** Check if status is Test Failed **** //
+           if (oObj.MSD_Status__c=='Test Failed'){
+           string str = 'MSD_'+mapProject.get(oObj.Project__c).name+'_Dev';
+            oObj.ownerId = queueMap.get(str);
+             }
+// **** Check if status is Deploy to Production**** //
+           if (oObj.MSD_Status__c=='Deploy to Prod'){
+              if(oObj.MSD_RFC_ID__c != Null){
+           string str = 'MSD_'+mapProject.get(oObj.Project__c).name+'_RMO';
+            oObj.ownerId = queueMap.get(str);
+          }
+          else {          
+          oObj.Release__c.addError('Cannot Change Status to Deploy to prod without RFC id on Release; Please contact your Release Coordinator');
+              }
+              }
+//********************************************************************
+// **** Check if status is Prod Deployed**** //
+           if (oObj.MSD_Status__c=='Prod Deployed'){
+                      string str = 'MSD_'+mapProject.get(oObj.Project__c).name+'_RC';
+            oObj.ownerId = queueMap.get(str);
+          }
+        
+              
+
+//********************************************************************
+// **** Check if status is Completed**** //
+           if (oObj.MSD_Status__c=='Closed'){
+           //string str = 'MSD_'+mapProject.get(oObj.Project__c).name+'_CID_Creator';
+            oObj.ownerId = oObj.Createdbyid;
+          }
+//********************************************************************
+
+}
+}
+}
